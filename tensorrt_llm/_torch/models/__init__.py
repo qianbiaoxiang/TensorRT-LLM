@@ -7,6 +7,7 @@ from .modeling_deepseekv3 import DeepseekV3ForCausalLM
 from .modeling_exaone4 import Exaone4ForCausalLM
 from .modeling_gemma3 import Gemma3ForCausalLM
 from .modeling_gemma3vl import Gemma3VLM
+from .modeling_hunyuan_moe import HunYuanMoEV1ForCausalLM
 from .modeling_gpt_oss import GptOssForCausalLM
 from .modeling_hyperclovax import HCXVisionForCausalLM
 from .modeling_llama import LlamaForCausalLM
@@ -38,6 +39,8 @@ __all__ = [
     "Gemma3ForCausalLM",
     "Gemma3VLM",
     "HCXVisionForCausalLM",
+    "HunYuanMoEV1ForCausalLM",
+    "Gemma3Model",
     "LlamaForCausalLM",
     "LlavaNextModel",
     "Mistral3VLM",
