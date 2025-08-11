@@ -12,19 +12,18 @@ from ..attention_backend import AttentionMetadata
 from ..attention_backend.interface import (PositionalEmbeddingParams,
                                            PredefinedAttentionMask, RopeParams)
 from ..model_config import ModelConfig
-from ..modules.attention import Attention
+from ..modules.attention import Attention, QkNormType
 from ..modules.decoder_layer import DecoderLayer
 from ..modules.embedding import Embedding
-from ..modules.fused_moe import RenormalizeMoeRoutingMethod, CutlassFusedMoE, VanillaMoE, create_moe
+from ..modules.fused_moe import (CutlassFusedMoE, RenormalizeMoeRoutingMethod,
+                                 VanillaMoE, create_moe)
 from ..modules.gated_mlp import GatedMLP
 from ..modules.linear import Linear, TensorParallelMode
 from ..modules.multi_stream_utils import maybe_execute_in_parallel
 from ..modules.rms_norm import RMSNorm
-from ..modules.rotary_embedding import RotaryEmbedding
 from ..utils import AuxStreamType, Fp4QuantizedTensor
 from .modeling_utils import (DecoderModel, DecoderModelForCausalLM,
-                             duplicate_kv_weight,
-                             register_auto_model)
+                             duplicate_kv_weight, register_auto_model)
 
 
 class HunyuanMoE(nn.Module):
@@ -121,6 +120,8 @@ class HunYuanAttention(Attention):
             max_position_embeddings=config.max_position_embeddings,
             bias=config.attention_bias,
             pos_embd_params=pos_embd_params,
+            qk_norm_type=QkNormType.post_rope
+            if use_qk_norm else QkNormType.none,
             layer_idx=layer_idx,
             dtype=config.torch_dtype,
             config=model_config,
@@ -214,7 +215,8 @@ class HunYuanDecoderLayer(DecoderLayer):
         is_moe_single_node = is_experts_valid and layer_idx >= config.moe_layer_num_skipped  # only support one node yet
 
         if is_moe_single_node:
-            self.mlp = HunyuanMoE(model_config, aux_stream_dict[AuxStreamType.MoeChunkingOverlap])
+            self.mlp = HunyuanMoE(
+                model_config, aux_stream_dict[AuxStreamType.MoeChunkingOverlap])
         else:
             self.mlp = GatedMLP(hidden_size=config.hidden_size,
                                 intermediate_size=config.intermediate_size,
@@ -331,7 +333,7 @@ class HunYuanModel(DecoderModel):
 
 @register_auto_model("HunYuanMoEV1ForCausalLM")
 class HunYuanMoEV1ForCausalLM(DecoderModelForCausalLM[HunYuanModel,
-                                                 PretrainedConfig]):
+                                                      PretrainedConfig]):
 
     def __init__(self, model_config: ModelConfig[PretrainedConfig]):
         super().__init__(HunYuanModel(model_config),
@@ -361,19 +363,22 @@ class HunYuanMoEV1ForCausalLM(DecoderModelForCausalLM[HunYuanModel,
                                  desc="Loading weights"):
             if len(module._parameters) > 0:
                 # skip load weights if tie word embeddings is enabled and layer is lm_head
-                if self.config.tie_word_embeddings and name.startswith("lm_head"):
+                if self.config.tie_word_embeddings and name.startswith(
+                        "lm_head"):
                     continue
                 names = name.split('.')
                 if names[-1] in params_map:
                     # model.layers.{idx}.mlp.shared_mlp.gate_up_proj or model.layers.{idx}.self_attn.qkv_proj
                     module_weights = []
                     for new_name in params_map[names[-1]]:
-                        fw = filter_weights('.'.join(names[:-1] + [new_name]), weights)
+                        fw = filter_weights('.'.join(names[:-1] + [new_name]),
+                                            weights)
                         if new_name in ['k_proj', 'v_proj']:
                             fw = {
-                                k: duplicate_kv_weight(
+                                k:
+                                duplicate_kv_weight(
                                     weight=v[:],
-                                    head_dim=head_dim,
+                                    num_kv_heads=v[:].shape[0] // head_dim,
                                     tensor_parallel_size=tp_size)
                                 if k in ["weight", "bias"] else v
                                 for k, v in fw.items()
@@ -383,15 +388,17 @@ class HunYuanMoEV1ForCausalLM(DecoderModelForCausalLM[HunYuanModel,
                 else:
                     name = name.replace('gate', 'gate.wg')
                     module_weights = filter_weights(name, weights)
-                    if isinstance(module, CutlassFusedMoE) or isinstance(module, VanillaMoE):
+                    if isinstance(module, CutlassFusedMoE) or isinstance(
+                            module, VanillaMoE):
                         # model.layers.{idx}.mlp.experts
                         updated_module_weights = {}
                         for weight_name, weight_value in module_weights.items():
                             new_weight_name = weight_name.replace(
-                                "gate_proj", "w1").replace(
-                                "up_proj", "w3").replace(
-                                "down_proj", "w2")
-                            updated_module_weights[new_weight_name] = weight_value
+                                "gate_proj",
+                                "w1").replace("up_proj",
+                                              "w3").replace("down_proj", "w2")
+                            updated_module_weights[
+                                new_weight_name] = weight_value
                         del module_weights
                         module.load_weights(weights=[updated_module_weights])
                     elif hasattr(module, 'load_weights'):
